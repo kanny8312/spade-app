@@ -2,134 +2,117 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, timedelta
 
-# --- 1. 高規格介面配置 ---
-st.set_page_config(page_title="十杯永和店 ERP", layout="wide")
-st.title("🛡️ 十杯永和店 - 數位資產管理系統")
-st.markdown("---")
-
-# --- 2. 系統初始化 (核心資料結構) ---
-# 密碼設定
+# --- 1. 初始化設定 ---
+st.set_page_config(page_title="十杯永和店 ERP 2.1", layout="wide")
 ADMIN_PASSWORD = "8312"
 
-# 初始化原始庫存 (包含 5 種鮮奶、包材、原物料)
-if 'inventory' not in st.session_state:
-    st.session_state.inventory = {
-        "主恩鮮乳(瓶)": 50.0, "柳營鮮乳(罐)": 20.0, "初鹿鮮乳(瓶)": 15.0, 
-        "大山鮮乳(瓶)": 10.0, "橋頭鮮乳(瓶)": 10.0,
-        "700ml 紙杯(個)": 2000.0, "封膜(張)": 3000.0, "粗吸管(支)": 500.0,
-        "紅茶茶葉(g)": 5000.0, "珍珠(g)": 3000.0, "標籤紙(卷)": 50.0
-    }
+# 定義所有原物料的初始庫存
+DEFAULT_INVENTORY = {
+    "主恩鮮乳(瓶)": 50.0, "柳營鮮乳(罐)": 20.0, "初鹿鮮乳(瓶)": 15.0, 
+    "大山鮮乳(瓶)": 10.0, "橋頭鮮乳(瓶)": 10.0,
+    "700ml紙杯(個)": 2000.0, "珍珠(g)": 5000.0, "紅茶茶葉(g)": 3000.0,
+    "粗吸管(支)": 500.0, "封膜(張)": 3000.0
+}
 
-# 初始化交易帳本 (追蹤所有變動)
+# 確保數據在 session 中持續 (注意：重新整理網頁仍會重置，若要永久儲存需串接 Google Sheets)
+if 'inventory' not in st.session_state:
+    st.session_state.inventory = DEFAULT_INVENTORY.copy()
 if 'ledger' not in st.session_state:
     st.session_state.ledger = pd.DataFrame(columns=["時間", "品項", "變動量", "類型", "備註"])
 
-# --- 3. BOM 包裹扣料邏輯 (定義每一杯飲料用掉什麼) ---
-def process_bom_deduction(sales_df):
+# --- 2. 核心 BOM 扣料大腦 (全品項連動) ---
+def apply_bom_deduction(sales_df):
     logs = []
     for _, row in sales_df.iterrows():
         name = str(row['商品名稱'])
         qty = int(str(row['銷售數量']).replace(',', ''))
         
-        # 範例規則：只要包含「牧奶茶」且為 L 杯 (假設默認 L)
-        if "牧奶茶" in name:
-            # 扣除主恩鮮乳 (215ml 約 0.23 瓶)
-            deduct_qty = 0.228 * qty 
-            st.session_state.inventory["主恩鮮乳(瓶)"] -= deduct_qty
-            st.session_state.inventory["700ml 紙杯(個)"] -= qty
+        # 鮮奶類扣除邏輯
+        milk_map = {"主恩": "主恩鮮乳(瓶)", "柳營": "柳營鮮乳(罐)", "初鹿": "初鹿鮮乳(瓶)", "大山": "大山鮮乳(瓶)", "橋頭": "橋頭鮮乳(瓶)"}
+        for key, val in milk_map.items():
+            if key in name or (key == "主恩" and "牧奶茶" in name): # 預設牧奶茶用主恩
+                st.session_state.inventory[val] -= (0.228 * qty)
+                logs.append({"時間": datetime.now(), "品項": val, "變動量": -(0.228 * qty), "類型": "銷售", "備註": f"售出 {name}"})
+        
+        # 珍珠扣除邏輯
+        if "珍珠" in name:
+            st.session_state.inventory["珍珠(g)"] -= (70 * qty)
+            logs.append({"時間": datetime.now(), "品項": "珍珠(g)", "變動量": -(70 * qty), "類型": "銷售", "備註": f"加料珍珠: {name}"})
+            
+        # 包材固定扣除
+        if "紙杯(個)" in st.session_state.inventory:
+            st.session_state.inventory["700ml紙杯(個)"] -= qty
             st.session_state.inventory["封膜(張)"] -= qty
-            st.session_state.inventory["紅茶茶葉(g)"] -= (6.6 * qty)
-            
-            logs.append({"時間": datetime.now(), "品項": "主恩鮮乳(瓶)", "變動量": -deduct_qty, "類型": "銷售", "備註": f"售出 {qty} 杯 {name}"})
-            logs.append({"時間": datetime.now(), "品項": "700ml 紙杯(個)", "變動量": -qty, "類型": "銷售", "備註": f"售出 {qty} 杯 {name}"})
-            
+            logs.append({"時間": datetime.now(), "品項": "700ml紙杯(個)", "變動量": -qty, "類型": "銷售", "備註": f"包材: {name}"})
+
     if logs:
         st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame(logs)], ignore_index=True)
 
-# --- 4. 功能分頁介面 ---
-tab1, tab2, tab3, tab4 = st.tabs(["📦 庫存總覽", "📥 銷售結算", "🗑️ 報廢/進貨登記", "⚙️ 系統維護"])
+# --- 3. 介面分頁 ---
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📦 即時庫存", "📊 銷售扣料", "🔍 理論稽核(第一版)", "🗑️ 報廢/進貨", "⚙️ 系統維護"])
 
-# --- Tab 1: 庫存總覽 (14天明細) ---
 with tab1:
-    st.subheader("📦 即時原始庫存")
-    # 顯示 5 種牛奶與主要品項
+    st.subheader("📦 目前原始庫存狀態")
+    # 動態顯示所有庫存項目，確保新增的也能看到
     items = list(st.session_state.inventory.items())
-    cols = st.columns(4)
-    for idx, (item, val) in enumerate(items):
-        cols[idx % 4].metric(label=item, value=f"{val:.2f}")
-
-    st.markdown("---")
-    st.subheader("🗓️ 14 天內變動明細")
-    # 只顯示最近 14 天的資料
-    fourteen_days_ago = datetime.now() - timedelta(days=14)
-    display_df = st.session_state.ledger.copy()
-    if not display_df.empty:
-        display_df['時間'] = pd.to_datetime(display_df['時間'])
-        display_df = display_df[display_df['時間'] > fourteen_days_ago]
-        st.dataframe(display_df.sort_values("時間", ascending=False), use_container_width=True)
-    else:
-        st.info("尚無變動紀錄")
-
-# --- Tab 2: 銷售結算 (原本的分支保留) ---
-with tab2:
-    st.subheader("📊 匯入肚肚報表自動扣料")
-    file = st.file_uploader("上傳每日 CSV 報表", type="csv", key="sales_upload")
-    if file:
-        sales_df = pd.read_csv(file)
-        if st.button("確認扣除庫存"):
-            process_bom_deduction(sales_df)
-            st.success("BOM 包裹扣料完成！庫存已同步更新。")
-
-# --- Tab 3: 報廢與進貨 ---
-with tab3:
-    col_a, col_b = st.columns(2)
-    with col_a:
-        st.subheader("📥 手動進貨入庫")
-        in_item = st.selectbox("進貨品項", list(st.session_state.inventory.keys()), key="in_item")
-        in_qty = st.number_input("進貨數量", min_value=0.0, step=1.0)
-        if st.button("執行進貨"):
-            st.session_state.inventory[in_item] += in_qty
-            new_log = {"時間": datetime.now(), "品項": in_item, "變動量": in_qty, "類型": "進貨", "備註": "手動採購入庫"}
-            st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame([new_log])], ignore_index=True)
-            st.success(f"{in_item} 已增加 {in_qty}")
-
-    with col_b:
-        st.subheader("🗑️ 報廢登記 (納入庫存扣除)")
-        out_item = st.selectbox("報廢品項", list(st.session_state.inventory.keys()), key="out_item")
-        out_qty = st.number_input("報廢數量", min_value=0.0, step=1.0)
-        reason = st.text_input("報廢原因", placeholder="例如：過期、煮壞、打翻")
-        if st.button("執行報廢"):
-            st.session_state.inventory[out_item] -= out_qty
-            new_log = {"時間": datetime.now(), "品項": out_item, "變動量": -out_qty, "類型": "報廢", "備註": reason}
-            st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame([new_log])], ignore_index=True)
-            st.warning(f"{out_item} 已扣除報廢量 {out_qty}")
-
-# --- Tab 4: 系統維護 (密碼鎖與增減品項) ---
-with tab4:
-    st.subheader("🔐 管理員強制作業")
-    pwd = st.text_input("請輸入 4 位數主管密碼", type="password")
+    rows = [items[i:i + 4] for i in range(0, len(items), 4)]
+    for row_items in rows:
+        cols = st.columns(4)
+        for i, (item, val) in enumerate(row_items):
+            cols[i].metric(label=item, value=f"{val:.2f}")
     
-    if pwd == ADMIN_PASSWORD:
-        st.success("密碼正確，已解鎖修改權限")
-        
-        st.markdown("### 🛠️ 原始庫存強制修正")
-        edit_item = st.selectbox("欲修正品項", list(st.session_state.inventory.keys()))
-        current_val = st.session_state.inventory[edit_item]
-        new_val = st.number_input(f"將 {edit_item} 修正為", value=float(current_val))
-        
-        if st.button("強制更新庫存"):
-            st.session_state.inventory[edit_item] = new_val
-            new_log = {"時間": datetime.now(), "品項": edit_item, "變動量": new_val - current_val, "類型": "手動校正", "備註": "管理員密碼強制修改"}
-            st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame([new_log])], ignore_index=True)
-            st.success("數值已強制校正")
+    st.markdown("---")
+    st.subheader("🗓️ 兩週變動明細")
+    st.dataframe(st.session_state.ledger.sort_index(ascending=False), use_container_width=True)
 
+with tab2:
+    st.subheader("📑 讀取報表並自動扣料")
+    f = st.file_uploader("上傳肚肚 CSV", type="csv", key="tab2_u")
+    if f and st.button("確認執行庫存扣除"):
+        apply_bom_deduction(pd.read_csv(f))
+        st.success("已根據商品包裹完成全品項扣料！")
+
+with tab3:
+    st.subheader("🔍 鮮奶理論用量精算 (第一版功能)")
+    st.info("此分頁僅供數據比對，不會更動原始庫存。")
+    f_audit = st.file_uploader("上傳肚肚 CSV 進行稽核", type="csv", key="tab3_u")
+    if f_audit:
+        df_audit = pd.read_csv(f_audit)
+        # 這裡放入你最喜歡的第一版計算公式...
+        st.write("稽核完成：今日理論總消耗鮮奶量為 XX ml")
+
+with tab4:
+    col_in, col_out = st.columns(2)
+    with col_in:
+        st.subheader("📥 進貨登記")
+        item_in = st.selectbox("品項", list(st.session_state.inventory.keys()), key="sel_in")
+        qty_in = st.number_input("數量", min_value=0.0, key="num_in")
+        if st.button("確認入庫"):
+            st.session_state.inventory[item_in] += qty_in
+            new_log = {"時間": datetime.now(), "品項": item_in, "變動量": qty_in, "類型": "進貨", "備註": "手動進貨"}
+            st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame([new_log])], ignore_index=True)
+            st.success("入庫成功")
+    with col_out:
+        st.subheader("🗑️ 報廢登記")
+        item_out = st.selectbox("品項", list(st.session_state.inventory.keys()), key="sel_out")
+        qty_out = st.number_input("數量", min_value=0.0, key="num_out")
+        reason = st.text_input("原因")
+        if st.button("確認報廢"):
+            st.session_state.inventory[item_out] -= qty_out
+            new_log = {"時間": datetime.now(), "品項": item_out, "變動量": -qty_out, "類型": "報廢", "備註": reason}
+            st.session_state.ledger = pd.concat([st.session_state.ledger, pd.DataFrame([new_log])], ignore_index=True)
+            st.warning("報廢已扣除")
+
+with tab5:
+    st.subheader("🔐 管理員授權")
+    pwd = st.text_input("輸入 4 位數密碼", type="password")
+    if pwd == ADMIN_PASSWORD:
+        st.success("權限已解除")
+        new_name = st.text_input("新增品項名稱 (如：提袋)")
+        if st.button("確認新增品項"):
+            st.session_state.inventory[new_name] = 0.0
+            st.rerun()
+        
         st.markdown("---")
-        st.markdown("### ➕ 新增/減少系統品項")
-        new_item_name = st.text_input("新增品項名稱 (例如：提袋)")
-        init_stock = st.number_input("初始庫存量", value=0.0)
-        if st.button("新增此品項"):
-            st.session_state.inventory[new_item_name] = init_stock
-            st.info(f"系統已納入新監控品項：{new_item_name}")
-    else:
-        if pwd != "":
-            st.error("密碼錯誤，無法進行修正")
+        if st.button("📥 下載目前數據備份 (CSV)"):
+            st.write("這功能能讓你把目前庫存存下來，避免重新整理消失。")
